@@ -10,12 +10,14 @@ function StatusBadge({ value }) {
   return <span className="badge ready">#{value}</span>
 }
 
-export default function StatusMonitorPanel({ activeDelivery, onDeliveryChange }) {
+export default function StatusMonitorPanel({ activeDelivery, onDeliveryChange, onProcessingComplete }) {
   const [status, setStatus] = useState({ total: 0, completed: 0, in_progress: 0 })
   const [contracts, setContracts] = useState(null)
   const [autoRefresh, setAutoRefresh] = useState(false)
   const [lastRefresh, setLastRefresh] = useState(null)
   const intervalRef = useRef(null)
+
+  const completionFiredRef = useRef(false)
 
   // Status Q&A
   const [delivery, setDelivery] = useState('')
@@ -25,7 +27,11 @@ export default function StatusMonitorPanel({ activeDelivery, onDeliveryChange })
   const chatEndRef = useRef(null)
 
   useEffect(() => {
-    if (activeDelivery) setDelivery(activeDelivery)
+    if (activeDelivery) {
+      setDelivery(activeDelivery)
+      // Auto-enable polling when a delivery is active
+      if (!autoRefresh) setAutoRefresh(true)
+    }
   }, [activeDelivery])
 
   async function refresh() {
@@ -79,6 +85,17 @@ export default function StatusMonitorPanel({ activeDelivery, onDeliveryChange })
 
   const pct = status.total > 0 ? Math.round((status.completed / status.total) * 100) : 0
   const allDone = status.total > 0 && status.in_progress === 0
+
+  // Notify parent when all contracts complete processing
+  useEffect(() => {
+    if (allDone && !completionFiredRef.current && delivery) {
+      completionFiredRef.current = true
+      onProcessingComplete?.(delivery)
+    }
+    if (!allDone) {
+      completionFiredRef.current = false
+    }
+  }, [allDone, delivery])
 
   return (
     <div className="panel">

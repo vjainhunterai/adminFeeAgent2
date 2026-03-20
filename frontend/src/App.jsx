@@ -7,6 +7,7 @@ export default function App() {
   // Shared state: when agent submits contracts, pass delivery to status panel
   const [activeDelivery, setActiveDelivery] = useState('')
   const [activeContracts, setActiveContracts] = useState([])
+  const [processingComplete, setProcessingComplete] = useState(false)
 
   return (
     <div style={{ height: '100vh', display: 'flex', flexDirection: 'column' }}>
@@ -35,6 +36,7 @@ export default function App() {
           onSessionComplete={(delivery, contracts) => {
             setActiveDelivery(delivery)
             setActiveContracts(contracts)
+            setProcessingComplete(false)
           }}
         />
 
@@ -42,12 +44,18 @@ export default function App() {
         <StatusMonitorPanel
           activeDelivery={activeDelivery}
           onDeliveryChange={setActiveDelivery}
+          onProcessingComplete={(delivery) => {
+            setActiveDelivery(delivery)
+            setProcessingComplete(true)
+          }}
         />
 
         {/* Panel 3: Analysis Chat */}
         <AnalysisPanel
           activeDelivery={activeDelivery}
           activeContracts={activeContracts}
+          processingComplete={processingComplete}
+          onAnalysisStarted={() => setProcessingComplete(false)}
         />
       </div>
     </div>

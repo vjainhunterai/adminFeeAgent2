@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react'
 import { getDeliveries, analysisSetup, analysisAsk, getReconciliation } from '../services/api'
 import MarkdownRenderer from '../components/MarkdownRenderer'
 
-export default function AnalysisPanel({ activeDelivery, activeContracts }) {
+export default function AnalysisPanel({ activeDelivery, activeContracts, processingComplete, onAnalysisStarted }) {
   const [deliveries, setDeliveries] = useState([])
   const [delivery, setDelivery] = useState('')
   const [contracts, setContracts] = useState([])
@@ -25,6 +25,74 @@ export default function AnalysisPanel({ activeDelivery, activeContracts }) {
   useEffect(() => {
     if (activeDelivery && !isSetup) setDelivery(activeDelivery)
   }, [activeDelivery])
+
+  // Auto-trigger: when processing completes, auto-setup + run reconciliation
+  useEffect(() => {
+    if (!processingComplete || !activeDelivery || isSetup) return
+
+    async function autoAnalyze() {
+      onAnalysisStarted?.()
+      setDelivery(activeDelivery)
+      setSetupLoading(true)
+
+      try {
+        // Step 1: Setup — normalize delivery + fetch contracts
+        const setupData = await analysisSetup(activeDelivery)
+        const norm = setupData.delivery_normalized
+        const ctrs = setupData.contracts || []
+        setNormalizedDelivery(norm)
+        setContracts(ctrs)
+        setIsSetup(true)
+
+        if (!ctrs.length) {
+          setMessages([{ role: 'system', content: `No contracts found for "${norm}".` }])
+          return
+        }
+
+        // Step 2: Auto-run reconciliation summary
+        setMessages([
+          {
+            role: 'agent',
+            content: `**Processing complete!** Found **${ctrs.length} contracts** for \`${norm}\`.\n\nGenerating reconciliation summary...`,
+          },
+        ])
+        setLoading(true)
+
+        try {
+          const reconData = await getReconciliation(norm)
+          const summaryLines = (reconData.summary || []).map(
+            (s) =>
+              `**${s.contract}**: PO=$${Number(s.po_spend || 0).toLocaleString()}, INV=$${Number(s.inv_spend || 0).toLocaleString()}, Report=$${s.report_spend !== null ? Number(s.report_spend).toLocaleString() : 'N/A'} — *${s.status}*`
+          )
+          setMessages([
+            {
+              role: 'agent',
+              content: reconData.formatted_report
+                ? `**Processing complete!** Found **${ctrs.length} contracts** for \`${norm}\`.\n\n${reconData.formatted_report}`
+                : `**Processing complete!** Found **${ctrs.length} contracts** for \`${norm}\`.\n\n**Reconciliation Summary:**\n\n${summaryLines.join('\n\n')}`,
+              extra: summaryLines.length ? `\n\n---\n**Raw Summary:**\n${summaryLines.join('\n')}` : '',
+            },
+            {
+              role: 'agent',
+              content: 'You can now ask follow-up questions — spend analysis, supplier breakdown, discrepancy details, etc.',
+            },
+          ])
+        } catch (reconErr) {
+          setMessages((prev) => [
+            ...prev,
+            { role: 'system', content: `Reconciliation error: ${reconErr.message}. You can still ask questions manually.` },
+          ])
+        }
+      } catch (e) {
+        setMessages([{ role: 'system', content: `Auto-analysis failed: ${e.message}` }])
+      } finally {
+        setSetupLoading(false)
+        setLoading(false)
+      }
+    }
+
+    autoAnalyze()
+  }, [processingComplete, activeDelivery])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -49,8 +117,8 @@ export default function AnalysisPanel({ activeDelivery, activeContracts }) {
         },
       ])
     } catch (e) {
-      setMessages([{ role: 'system', content: `Error: ${e.message}` }])
-      setIsSetup(true) // show chat anyway so user sees error
+      setMessages([{ role: 'system', content: `Setup failed: ${e.message}` }])
+      // Don't transition to chat - stay on setup screen so user can retry
     } finally {
       setSetupLoading(false)
     }
@@ -158,6 +226,12 @@ export default function AnalysisPanel({ activeDelivery, activeContracts }) {
               'Start Analysis'
             )}
           </button>
+
+          {messages.length > 0 && messages[0].role === 'system' && (
+            <div style={{ marginTop: 12, padding: '10px 14px', background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 8, color: '#ef4444', fontSize: 13 }}>
+              {messages[0].content}
+            </div>
+          )}
         </div>
       </div>
     )

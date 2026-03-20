@@ -58,11 +58,24 @@ def extract_sql_query(llm_response: str) -> str:
     return sql_query.replace("\n", " ").replace("`", "").strip()
 
 
+def _fallback_normalize_delivery(user_input: str) -> str:
+    """Normalize delivery name using regex (no LLM needed)."""
+    text = user_input.strip().lower()
+    # Match patterns like "delivery 10", "delivery_10", "delivery10"
+    m = re.match(r"delivery[_\s]*(\d+)", text)
+    if m:
+        return f"delivery_{m.group(1)}"
+    return text
+
+
 def normalize_delivery(user_input: str) -> str:
-    """Normalize delivery name using LLM."""
-    prompt = DELIVERY_PROMPT.format(delivery=user_input)
-    response = llm.invoke(prompt)
-    return response.content.strip().lower()
+    """Normalize delivery name using LLM, with regex fallback."""
+    try:
+        prompt = DELIVERY_PROMPT.format(delivery=user_input)
+        response = llm.invoke(prompt)
+        return response.content.strip().lower()
+    except Exception:
+        return _fallback_normalize_delivery(user_input)
 
 
 def generate_analysis_sql(question: str, contracts: list) -> str:
