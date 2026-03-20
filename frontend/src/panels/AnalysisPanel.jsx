@@ -21,9 +21,18 @@ export default function AnalysisPanel({ activeDelivery, activeContracts, process
       .catch(() => {})
   }, [])
 
-  // If parent passes activeDelivery, pre-fill
+  // When activeDelivery changes, reset state so auto-trigger can fire for new delivery
+  const prevDeliveryRef = useRef(activeDelivery)
   useEffect(() => {
-    if (activeDelivery && !isSetup) setDelivery(activeDelivery)
+    if (activeDelivery && activeDelivery !== prevDeliveryRef.current) {
+      prevDeliveryRef.current = activeDelivery
+      // Reset analysis state for the new delivery
+      setIsSetup(false)
+      setMessages([])
+      setContracts([])
+      setNormalizedDelivery('')
+    }
+    if (activeDelivery) setDelivery(activeDelivery)
   }, [activeDelivery])
 
   // Auto-trigger: when processing completes, auto-setup + run reconciliation

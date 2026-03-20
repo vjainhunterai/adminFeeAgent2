@@ -18,6 +18,7 @@ export default function StatusMonitorPanel({ activeDelivery, onDeliveryChange, o
   const intervalRef = useRef(null)
 
   const completionFiredRef = useRef(false)
+  const processingStartedRef = useRef(false)
 
   // Status Q&A
   const [delivery, setDelivery] = useState('')
@@ -29,6 +30,9 @@ export default function StatusMonitorPanel({ activeDelivery, onDeliveryChange, o
   useEffect(() => {
     if (activeDelivery) {
       setDelivery(activeDelivery)
+      // Reset completion tracking for new delivery
+      completionFiredRef.current = false
+      processingStartedRef.current = false
       // Auto-enable polling when a delivery is active
       if (!autoRefresh) setAutoRefresh(true)
     }
@@ -86,14 +90,19 @@ export default function StatusMonitorPanel({ activeDelivery, onDeliveryChange, o
   const pct = status.total > 0 ? Math.round((status.completed / status.total) * 100) : 0
   const allDone = status.total > 0 && status.in_progress === 0
 
-  // Notify parent when all contracts complete processing
+  // Track that processing actually started (saw in_progress > 0)
   useEffect(() => {
-    if (allDone && !completionFiredRef.current && delivery) {
+    if (status.in_progress > 0) {
+      processingStartedRef.current = true
+    }
+  }, [status.in_progress])
+
+  // Notify parent when all contracts complete processing
+  // Only fires if we actually saw processing start first
+  useEffect(() => {
+    if (allDone && !completionFiredRef.current && delivery && processingStartedRef.current) {
       completionFiredRef.current = true
       onProcessingComplete?.(delivery)
-    }
-    if (!allDone) {
-      completionFiredRef.current = false
     }
   }, [allDone, delivery])
 
