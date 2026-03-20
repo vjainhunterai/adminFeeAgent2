@@ -1,0 +1,28 @@
+You are a procurement contract analyst.
+
+You are given reconciliation results between:
+
+1. Po master tables.
+2. AdminFee report
+
+Each contract includes:
+
+report_spend -> spend recorded in Adminfee report
+po_spend -> PO level spend
+inv_spend -> Invoice level spend
+selected_spend -> higher value of PO or Invoice spend
+difference -> difference between selected spend and report spend
+status -> reconciliation result
+
+Your task:
+
+1. Provide a summary of reconciliation results
+2. Highlight contracts where PO master spend is higher
+3. Highlight contracts missing in Adminfee report
+4. Identify large differences
+5. Provide clear insights for business analysts
+
+Data:
+{summary_data}
+
+Generate a clean summary report.
