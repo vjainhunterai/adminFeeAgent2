@@ -1,7 +1,7 @@
-const API_BASE = '/api';
+const API = '/api';
 
 async function request(url, options = {}) {
-  const res = await fetch(`${API_BASE}${url}`, {
+  const res = await fetch(`${API}${url}`, {
     headers: { 'Content-Type': 'application/json', ...options.headers },
     ...options,
   });
@@ -12,66 +12,51 @@ async function request(url, options = {}) {
   return res.json();
 }
 
-// ─── Dashboard ───────────────────────────────────────────────────────────────
-export const getDashboardStats = () => request('/dashboard/stats');
-export const getRecentActivity = () => request('/dashboard/recent-activity');
+// ─── Panel 1: Processing Agent Chat ──────────────────────────────────────────
+export const agentStart = () =>
+  request('/agent/start', { method: 'POST' });
 
-// ─── Processing ──────────────────────────────────────────────────────────────
-export const submitContracts = (contracts, deliveryName, inputType = 'manual') =>
-  request('/processing/submit', {
+export const agentChat = (sessionId, message) =>
+  request('/agent/chat', {
     method: 'POST',
-    body: JSON.stringify({ contracts, delivery_name: deliveryName, input_type: inputType }),
+    body: JSON.stringify({ session_id: sessionId, message }),
   });
 
-export const triggerPipeline = () =>
-  request('/processing/trigger-pipeline', { method: 'POST' });
+// ─── Panel 2: Status Monitor ─────────────────────────────────────────────────
+export const getStatusSummary = () => request('/status/summary');
 
-export const getProcessingStatus = () => request('/processing/status');
-
-export const getProcessingContracts = () => request('/processing/contracts');
+export const getStatusContracts = () => request('/status/contracts');
 
 export const askStatusQuestion = (question, delivery) =>
-  request('/processing/status-question', {
+  request('/status/ask', {
     method: 'POST',
     body: JSON.stringify({ question, delivery }),
   });
 
-// ─── Analysis ────────────────────────────────────────────────────────────────
+// ─── Panel 3: Contract Analysis ──────────────────────────────────────────────
 export const getDeliveries = () => request('/analysis/deliveries');
 
-export const normalizeDelivery = (delivery) =>
-  request('/analysis/normalize-delivery', {
+export const analysisSetup = (delivery) =>
+  request('/analysis/setup', {
     method: 'POST',
     body: JSON.stringify({ delivery }),
   });
 
-export const getContractsForDelivery = (delivery) =>
-  request('/analysis/contracts', {
-    method: 'POST',
-    body: JSON.stringify({ delivery }),
-  });
-
-export const askAnalysisQuestion = (question, delivery, contracts = null) =>
+export const analysisAsk = (question, delivery, contracts = null) =>
   request('/analysis/ask', {
     method: 'POST',
     body: JSON.stringify({ question, delivery, contracts }),
   });
 
 // ─── Reports ─────────────────────────────────────────────────────────────────
-export const getContractSummary = (delivery) =>
-  request('/reports/summary', {
+export const getReconciliation = (delivery) =>
+  request('/reports/reconciliation', {
     method: 'POST',
     body: JSON.stringify({ delivery }),
   });
 
 export const getAuditReport = (delivery = null) =>
   request(`/reports/audit${delivery ? `?delivery=${encodeURIComponent(delivery)}` : ''}`);
-
-export const runCustomQuery = (query) =>
-  request('/reports/custom-query', {
-    method: 'POST',
-    body: JSON.stringify({ query }),
-  });
 
 // ─── Health ──────────────────────────────────────────────────────────────────
 export const healthCheck = () => request('/health');
