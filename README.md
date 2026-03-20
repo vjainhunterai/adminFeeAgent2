@@ -1,3 +1,17 @@
+git clone -b claude/frontend-admin-fee-wrapper-TB4Sc https://github.com/vjainhunterai/adminFeeAgent.git
+
+
+
+G:\> git clone https://github.com/vjainhunterai/adminFeeAgent2.git
+G:\> cd adminFeeAgent2
+G:\adminFeeAgent2> copy .env.example .env
+G:\adminFeeAgent2> notepad .env        &REM set your OPENAI_API_KEY
+G:\adminFeeAgent2> start.bat
+
+
+
+
+
 Windows Setup (Step-by-Step)
 Prerequisites
 Tool	Version	Download
