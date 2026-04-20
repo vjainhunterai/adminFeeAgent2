@@ -10,9 +10,78 @@
 |-------|-------|
 | Application | AdminFee Reconciliation Agent |
 | Owner | AdminFee Engineering Team |
-| Version | 1.0 (Draft) |
+| Version | 1.0 |
 | Last Updated | 2026-04-20 |
-| Status | Draft — Section 1 Complete |
+| Status | Complete — All 28 sections filled |
+
+---
+
+## Implementation Status Legend
+
+This document mixes **current reality** with **target-state design**. Every subsection is tagged with one of the following labels so reviewers can tell them apart:
+
+| Label | Meaning |
+|-------|---------|
+| **IMPLEMENTED** | Already exists and working in the codebase today |
+| **PARTIAL** | Some of it exists in code; rest is target state |
+| **TARGET STATE** | Not yet built — documented as the intended future design |
+| **NA** | Not applicable to this application (now or later) |
+
+---
+
+## Implementation Status Matrix
+
+High-level summary of what is real today vs. planned. Detailed per-subsection status labels appear inline throughout the document.
+
+| Section | Area | Current Status |
+|---------|------|----------------|
+| 1 | Product Vision & Problem Statement | **IMPLEMENTED** — mission, users, non-goals reflect shipped product |
+| 2 | Agent Identity, Persona & Voice | **IMPLEMENTED** — tone/voice matches live prompts in `prompts/` |
+| 3 | System Architecture Overview | **IMPLEMENTED** — 3-panel UI + FastAPI backend + MySQL + S3 + Airflow all live |
+| 4 | Multi-Agent Topology | **PARTIAL** — web backend uses a step-based state machine, not LangGraph. LangGraph only in legacy CLI scripts (`adminfee_processing_agent.py`, `contract_analyst_agent_cot.py`) |
+| 5 | LLM Strategy | **PARTIAL** — current code uses OpenAI `gpt-4.1-mini`; LLaMA 3.1 8B is target-state migration |
+| 6 | Prompt Engineering | **IMPLEMENTED** — 7 prompt files in `prompts/` (`delivery_normalizer.txt`, `sql_generator.txt`, etc.) |
+| 7 | Tool Use & Function Calling | **PARTIAL** — real tools differ: `insert_contracts_metadata`, `trigger_airflow_dag`, `run_sql`, `get_contract_summary` |
+| 8 | Memory Architecture | **IMPLEMENTED** — in-memory session dict in `backend/main.py` |
+| 9 | RAG | **PARTIAL** — structured SQL retrieval exists; no embeddings |
+| 10 | Orchestration & Control Flow | **PARTIAL** — step-based state machine in `backend/main.py`; not the LangGraph StateGraph diagrammed |
+| 11 | Conversation Design & State | **IMPLEMENTED** — session-scoped history; no persistence |
+| 12 | Frontend Architecture | **IMPLEMENTED** — React 18 + Vite 5, 3 panels, Markdown renderer |
+| 13 | Backend Services | **IMPLEMENTED** — modular monolith: `main.py`, `database.py`, `llm_service.py` |
+| 14 | Streaming & Real-Time | **IMPLEMENTED** — 30-second polling in StatusMonitorPanel; no SSE/WebSocket |
+| 15 | Full-Stack Integration | **IMPLEMENTED** — REST over JSON; Vite proxy `/api` → `localhost:8000` |
+| 16 | Auth, Authz & Sessions | **PARTIAL** — session IDs exist; SSO/RBAC/audit log **TARGET STATE** |
+| 17 | Guardrails & Alignment | **TARGET STATE** — no input filter, no output filter, no policy layer in code today |
+| 18 | Threat Modeling & Defense | **TARGET STATE** — threat model documented; prompt-injection defenses, circuit breakers, secrets vaulting not yet coded |
+| 19 | UX & Interaction Design | **PARTIAL** — core UX shipped; thumbs-up/down feedback **TARGET STATE** |
+| 20 | Testing Strategy | **TARGET STATE** — no test files, no eval suites, no CI checks in repo today |
+| 21 | Observability & Monitoring | **PARTIAL** — basic Python logging only; Prometheus/Grafana/alerts **TARGET STATE** |
+| 22 | Cost Management | **TARGET STATE** — no cost metering or caching layers coded yet |
+| 23 | API Design & Contracts | **PARTIAL** — REST endpoints exist; versioning/rate-limit/OpenAPI usage **TARGET STATE** |
+| 24 | Data Architecture & Storage | **PARTIAL** — tables exist (`admin_fee_metadata`, `adminfee_audit_data`); agent audit log **TARGET STATE** |
+| 25 | Deployment & Infrastructure | **TARGET STATE** — no CI/CD, no Terraform, no containers in repo today |
+| 26 | Reliability & Resilience | **TARGET STATE** — no SLOs, circuit breakers, DR runbook in code |
+| 27 | Versioning & Roadmap | **TARGET STATE** — no SemVer tags, no ADRs written yet |
+| 28 | Reference Appendix | **IMPLEMENTED** — glossary and references accurate |
+
+> **How to read this document**: If a subsection is labeled **IMPLEMENTED** or **PARTIAL**, the described behavior (in full or in part) exists in the code. If labeled **TARGET STATE**, treat it as the design intent to build against — it is NOT present today.
+
+---
+
+## Known Deviations from As-Built Code
+
+Explicit corrections where the design document aspires differently than what is shipped:
+
+| Design claim | Actual code today | Path forward |
+|--------------|-------------------|--------------|
+| LLaMA 3.1 8B (on-prem / Bedrock) | OpenAI `gpt-4.1-mini` via LangChain `ChatOpenAI` | Planned swap; track as ADR-003 |
+| LangGraph StateGraph in web backend | Dict-based step machine in `backend/main.py` (LangGraph lives only in legacy CLI scripts) | Migrate web flow to LangGraph; track as follow-up ADR |
+| Delivery IDs like `VRIAC_PRPS1_D` | Actual pattern is `delivery_<N>` (e.g., `delivery_10`) | LLD examples are illustrative; catalog in code uses `delivery_<N>` |
+| DB credentials in env vars | Hardcoded in `backend/database.py` | Security backlog item |
+| Pydantic schemas in `backend/schemas/` | Request models inline in `backend/main.py` | Refactor when backend grows |
+| `settings.yaml` for config | No settings file; prompts loaded by filename | Add when config surface grows |
+| Flyway migrations | No migration files today | Adopt when schema churns |
+| `/v1/chat` URI versioning | Current path is `/api/agent/chat` | Adopt at first breaking change |
 
 ---
 
@@ -496,6 +565,8 @@ v1.0 uses a **single supervisor graph** rather than multiple specialized agents.
 
 # Part III — Behavior & Knowledge
 
+> **Status banner for Sections 6–11:** Mostly **IMPLEMENTED**. Seven domain prompts exist in `prompts/`, LLM normalization + regex fallback lives in `backend/llm_service.py:71-78`, session memory is a live dict in `backend/main.py`. **TARGET STATE** items: LangGraph StateGraph (§10 — only in legacy CLI scripts today), embedding-based RAG (§9.3), semantic cache (§9.4), prompt versioning in YAML (§6.4).
+
 ## 6. Prompt Engineering & System Prompts
 
 ### 6.1 System Prompt Structure
@@ -871,6 +942,8 @@ Terminal conditions: `next_node == "END"`, max iterations reached, unrecoverable
 
 # Part IV — Frontend & Backend
 
+> **Status banner for Sections 12–15: IMPLEMENTED.** The 3-panel React/Vite UI, FastAPI modular monolith, 30-second status polling, and REST integration all exist in the current codebase. The only **TARGET STATE** items in this part are TypeScript migration (§15.2), rate limits (§23.3), and SSE streaming (§14.1 alternative).
+
 ## 12. Frontend Architecture
 
 ### 12.1 Framework & Rendering Strategy
@@ -1173,6 +1246,8 @@ Logs shipped to Voya's central log store; retained 1 year; immutable (append-onl
 
 # Part V — Safety & Security
 
+> **Status banner for Sections 17–18**: **TARGET STATE (mostly).** The current codebase has no input filter, no output filter, no prompt-injection defenses, no circuit breakers, and no secrets-vaulting — only network-level trust. Everything in this part describes the design we intend to build. Items already in code are called out individually below.
+
 ## 17. Guardrails & Alignment
 
 ### 17.1 Policy Layer
@@ -1314,6 +1389,8 @@ Assets: DAG trigger capability, delivery data in S3, DB records.
 
 # Part VI — Quality & Operations
 
+> **Status banner for Sections 20–26**: Large portions are **TARGET STATE**. Specifically: Testing (§20), Observability (§21), Cost Management (§22), CI/CD + Deployment (§25), and Reliability (§26) are mostly not yet in code. UX (§19) and API (§23) are partially shipped. See per-section banners for detail.
+
 ## 19. UX & Interaction Design
 
 ### 19.1 Onboarding
@@ -1368,6 +1445,9 @@ Assets: DAG trigger capability, delivery data in S3, DB records.
 ---
 
 ## 20. Testing Strategy
+
+> **Status banner for Section 20: TARGET STATE.** No test files (pytest, Vitest, Playwright) exist in the repository today. No LLM eval harness, no golden sets, no CI test job. Everything below is the target test pyramid we intend to build.
+
 
 ### 20.1 Test Pyramid
 
@@ -1424,6 +1504,9 @@ Assets: DAG trigger capability, delivery data in S3, DB records.
 ---
 
 ## 21. Observability & Monitoring
+
+> **Status banner for Section 21: TARGET STATE (mostly).** Today the backend writes to Python `stdout` logs only — no Prometheus client, no Grafana, no alerting rules, no trace IDs. The detailed observability stack below is the target.
+
 
 ### 21.1 Telemetry Stack
 
@@ -1495,6 +1578,9 @@ On-call rotation: AdminFee eng team, weekly shifts; first-responder → platform
 ---
 
 ## 22. Cost Management & Optimization
+
+> **Status banner for Section 22: TARGET STATE.** No cost metering, token budgeting, caching, or attribution exists in code today. The design below is what we plan to build.
+
 
 ### 22.1 Cost Model
 
@@ -1729,6 +1815,9 @@ CREATE TABLE agent_audit_log (
 
 ## 25. Deployment & Infrastructure
 
+> **Status banner for Section 25: TARGET STATE (mostly).** The repo has no `.github/workflows/`, no `Dockerfile`, no `terraform/` directory, and no blue/green scripts today. Deploys are manual (`python run_backend.py`, `npm run dev`). The design below is the target.
+
+
 ### 25.1 Environments
 
 **Applicable — Detailed**
@@ -1794,6 +1883,9 @@ Data handling: staging DB is a nightly-refreshed scrubbed copy of prod (account 
 ---
 
 ## 26. Reliability & Resilience
+
+> **Status banner for Section 26: TARGET STATE.** No SLO dashboards, no circuit breakers, no backup/restore drills, no defined RPO/RTO in code/config today. Basic `try/except` error handling exists in `backend/main.py`; everything else below is the target.
+
 
 ### 26.1 SLOs & Error Budgets
 
