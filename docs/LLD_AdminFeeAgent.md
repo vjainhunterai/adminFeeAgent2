@@ -1867,4 +1867,174 @@ UX principle: **never fabricate data**. Always say what is not available.
 
 ---
 
-_Sections 1–26 complete. Awaiting confirmation to proceed to Section 27._
+# Part VII — Evolution
+
+## 27. Versioning & Roadmap
+
+### 27.1 Versioning Scheme
+
+**Applicable — Detailed**
+
+| Artifact | Scheme | Example |
+|----------|--------|---------|
+| **App release** | SemVer (MAJOR.MINOR.PATCH) | `1.3.2` |
+| **API** | URI prefix on breaking change | `/v1/chat` → `/v2/chat` |
+| **LLM model** | Provider-native identifier pinned in `settings.yaml` | `llama-3.1-8b-instruct` |
+| **Prompt templates** | Filename suffix + header metadata | `normalize_v2.md`, `version: 1.2` |
+| **Database schema** | Flyway sequential | `V023__add_audit_log.sql` |
+| **LangGraph** | Graph version bumped when node topology changes | `graph_version: 3` in state |
+
+### 27.2 Change Management
+
+**Applicable — Brief**
+
+| Change Type | Process |
+|-------------|---------|
+| New feature | Issue → design note in PR description → review → merge → release |
+| Prompt change | PR with before/after + golden-set diff → tech lead sign-off |
+| Model swap | ADR required; 48h shadow run in staging; tech lead + ops lead sign-off |
+| Breaking API change | 90-day deprecation window; new version deployed in parallel |
+| Emergency hotfix | Fast-track PR; post-hoc ADR within 5 business days |
+
+ADRs live in `docs/adr/NNNN-title.md` with status `proposed | accepted | superseded`.
+
+### 27.3 Short-Term Roadmap (0–3 months)
+
+**Applicable — Brief**
+
+| Item | Owner | Exit Criteria |
+|------|-------|---------------|
+| Redis-backed session store | Backend eng | Multi-instance deploy possible; session survives app restart |
+| SSE streaming for chat replies | Full-stack | First token ≤ 1s P95 |
+| Expand delivery catalog to 150 entries | Ops + eng | Normalization golden set still ≥95% |
+| Frontend migration to TypeScript | Frontend eng | All components typed; CI blocks on type errors |
+| Automated prompt-injection red-team in CI | Platform sec | 10-prompt suite runs on every PR |
+| Dockerize + deploy to ECS Fargate | SRE | Blue/green canary working in prod |
+
+### 27.4 Medium-Term Roadmap (3–12 months)
+
+**Directional — Applicable**
+
+| Bet | Rationale |
+|-----|-----------|
+| SSO (Okta) + RBAC | Needed for role-gated DAG triggers and per-user audit attribution |
+| Embedding-based normalization | Enables fuzzy matching when catalog exceeds ~200 deliveries |
+| Cascade to LLaMA 3.1 70B on low confidence | Improves hard-case accuracy while keeping avg cost low |
+| Multi-region warm standby (us-west-2) | DR posture for SOX-adjacent tooling |
+| Per-analyst feedback + thumbs up/down | Closes the loop on normalization and summary quality |
+| Cross-session memory (opt-in) | Surfaces prior-day context ("Yesterday you reconciled VRIAC_PRPS1_D with a $0.00 delta") |
+
+### 27.5 Long-Term Vision (12+ months)
+
+**Directional — Applicable (not committed)**
+
+- **Autonomous batch mode**: agent runs the daily reconciliation batch end-to-end overnight, emailing analysts only exceptions.
+- **Multi-agent expansion**: specialized agents for trade reconciliation, corporate actions — coordinated by a supervisor. AdminFee agent becomes one of several peers.
+- **Explainable reconciliation**: natural-language explanation of every delta with linked source rows — aimed at auditor consumption.
+- **Self-healing pipelines**: on DAG failure, agent proposes (and with approval, applies) common fixes (rerun, partial reprocess).
+- **Voice + mobile** for on-call supervisors.
+- **Federated deployment** for sister Voya business units with isolated data scopes.
+
+North-star scenario: an operations lead arrives Monday morning, asks "How did the weekend batch go?", and gets a full, cited, cross-delivery briefing in 30 seconds.
+
+---
+
+## 28. Reference Appendix
+
+### 28.1 Glossary
+
+**Applicable — Detailed**
+
+| Term | Definition |
+|------|-----------|
+| **AdminFee** | Administrative fee charged on retirement / insurance products at Voya |
+| **Delivery** | A scheduled fee file (daily/weekly/monthly) for a specific product line |
+| **Delivery ID** | Canonical identifier, e.g., `VRIAC_PRPS1_D` (VRIAC + product code + frequency) |
+| **DAG** | Directed Acyclic Graph — an Airflow workflow that produces a delivery's output |
+| **Run ID** | Airflow identifier for a single DAG execution, e.g., `manual__2026-04-20T14:30:22` |
+| **Reconciliation** | Comparison of expected vs. actual fee totals for a given delivery + date |
+| **S3 prefix** | The bucket-relative folder under which a delivery's outputs are written |
+| **VRIAC** | Voya Retirement Insurance and Annuity Company (a product-line prefix) |
+| **PRPS1 / JH** | Product codes appearing in delivery IDs |
+| **Normalization** | Mapping a user's fuzzy phrase to a canonical delivery ID |
+| **Analysis Panel** | Right-hand UI panel showing reconciliation summary + follow-up Q&A |
+| **Status Monitor** | Middle UI panel showing live Airflow task states |
+| **Session store** | In-memory dict holding per-session agent state |
+| **Fernet** | Symmetric authenticated encryption used for at-rest config secrets |
+| **LangGraph** | StateGraph framework used to orchestrate agent nodes |
+| **Golden set** | Curated `(input, expected_output)` pairs used to evaluate LLM quality |
+
+Acronyms: SSO (Single Sign-On), RBAC (Role-Based Access Control), SLO (Service Level Objective), RPO (Recovery Point Objective), RTO (Recovery Time Objective), SOX (Sarbanes-Oxley), ADR (Architecture Decision Record), MTTR (Mean Time to Reconciliation), BFF (Backend-For-Frontend), SCA (Software Composition Analysis), SBOM (Software Bill of Materials).
+
+### 28.2 Architecture Decision Records (ADRs)
+
+**Applicable — Index**
+
+| ID | Title | Status |
+|----|-------|--------|
+| ADR-001 | Use LangGraph StateGraph over free-form ReAct | Accepted |
+| ADR-002 | Trigger Airflow via SSH/Paramiko instead of REST API | Accepted |
+| ADR-003 | Replace OpenAI GPT-4.1-mini with LLaMA 3.1 8B for data residency + cost | Accepted |
+| ADR-004 | 3-panel UI (chat + monitor + analysis) | Accepted |
+| ADR-005 | In-memory session store for v1; Redis in v2 | Accepted |
+| ADR-006 | Regex fallback for delivery normalization | Accepted |
+| ADR-007 | Auto-trigger analysis on Airflow completion | Accepted |
+| ADR-008 | Modular monolith over microservices for v1 | Accepted |
+| ADR-009 | Plain JavaScript in v1; TypeScript migration in v2 | Accepted (time-boxed) |
+| ADR-010 | Short polling over SSE for status updates in v1 | Accepted (time-boxed) |
+
+Files: `docs/adr/0001-langgraph-stategraph.md` through `docs/adr/0010-short-polling.md` (to be authored).
+
+### 28.3 External References
+
+**Applicable — Brief**
+
+| Category | Reference |
+|----------|-----------|
+| LangGraph | https://langchain-ai.github.io/langgraph/ |
+| LangChain | https://python.langchain.com/ |
+| FastAPI | https://fastapi.tiangolo.com/ |
+| Apache Airflow | https://airflow.apache.org/docs/ |
+| LLaMA 3.1 model card | Meta LLaMA 3.1 release notes |
+| AWS S3 Boto3 | https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/s3.html |
+| Paramiko | https://www.paramiko.org/ |
+| Pydantic v2 | https://docs.pydantic.dev/latest/ |
+| SQLAlchemy 2.0 | https://docs.sqlalchemy.org/en/20/ |
+| Prompt injection taxonomy | OWASP Top 10 for LLM Applications (2024) |
+| STRIDE threat modeling | Microsoft STRIDE guide |
+| Internal: Voya AdminFee runbook | (internal wiki link) |
+| Internal: Voya DAG catalog | (internal wiki link) |
+
+### 28.4 Diagrams Index
+
+**Applicable — Brief**
+
+| Diagram | Section | Source |
+|---------|---------|--------|
+| High-level architecture | §3.1 | Inline ASCII |
+| Request lifecycle | §3.3 | Inline list |
+| LangGraph state machine | §10.1 | Inline ASCII |
+| Component inventory | §3.2 | Inline table |
+| Data store layout | §24.1 | Inline table |
+| Threat model (STRIDE) | §18.1 | Inline table |
+
+All diagrams are inline in this document for v1. Future: externalize to draw.io / Mermaid sources under `docs/diagrams/`.
+
+### 28.5 Document Revision History
+
+**Applicable — Detailed**
+
+| Version | Date | Author | Summary |
+|---------|------|--------|---------|
+| 0.1 | 2026-04-20 | AdminFee Eng | Initial skeleton with 28 sections, Section 1 complete |
+| 0.2 | 2026-04-20 | AdminFee Eng | Added Sections 2–5 (Identity, Architecture, Topology, LLM) |
+| 0.3 | 2026-04-20 | AdminFee Eng | Added Sections 6–10 (Prompts, Tools, Memory, RAG, Orchestration) |
+| 0.4 | 2026-04-20 | AdminFee Eng | Added Sections 11–15 (Conversation, Frontend, Backend, Streaming, Integration) |
+| 0.5 | 2026-04-20 | AdminFee Eng | Added Sections 16–20 (Auth, Safety, UX, Testing) |
+| 0.6 | 2026-04-20 | AdminFee Eng | Added Sections 21–23 (Observability, Cost, API) |
+| 0.7 | 2026-04-20 | AdminFee Eng | Added Sections 24–26 (Data, Deployment, Reliability) |
+| **1.0** | **2026-04-20** | **AdminFee Eng** | **Added Sections 27–28; document complete for v1 review** |
+
+---
+
+_Document complete: Sections 1–28. Version 1.0 ready for AdminFee engineering and ops review._
