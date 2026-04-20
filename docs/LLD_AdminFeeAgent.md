@@ -818,4 +818,289 @@ Terminal conditions: `next_node == "END"`, max iterations reached, unrecoverable
 
 ---
 
-_Sections 1–10 complete. Awaiting confirmation to proceed to Section 11._
+## 11. Conversation Design & State
+
+### 11.1 Turn Structure
+
+**Applicable — Detailed**
+
+| Element | Definition |
+|---------|-----------|
+| **User turn** | Single text message submitted via AgentChatPanel input |
+| **Agent turn** | One or more messages — may include: (a) acknowledgment, (b) tool-progress update, (c) final reply |
+| **Tool interleaving** | Tools fire between user turn and final agent reply; intermediate tool status streams to StatusMonitorPanel (not chat) |
+| **Multi-message turns** | Agent may emit 2 messages: "Triggering DAG..." then "Reconciliation complete" — both within one logical turn |
+| **Turn boundary** | A turn ends when `next_node == "END"` in the LangGraph state |
+
+### 11.2 Context Window Management
+
+**Applicable — Brief**
+
+- **Window size**: 8k tokens (LLaMA 3.1 8B practical limit for quality).
+- **Budget allocation**: system prompt (~800) + few-shots (~400) + session summary (~500) + recent history (~2k) + tool results (~1k) + output (~1k) + headroom (~2.3k).
+- **Compression strategy**: when chat history exceeds ~10 turns, oldest turns are replaced with a single summary line (`"Previously: user reconciled VRIAC_PRPS1_D on 2026-04-20, match"`).
+- **Pinning**: active delivery block is always pinned — never evicted during a session.
+
+### 11.3 Conversation Persistence
+
+**Partially Applicable**
+
+| Item | v1 Status |
+|------|-----------|
+| In-memory chat history per session | Applicable — stored in `AgentState.chat_history` |
+| Persistent storage (DB) | **NA (v1)** — sessions lost on restart; acceptable for ops tool |
+| Replay | NA — no conversation-replay feature |
+| Export | Partial — user can copy reconciliation summary manually; no one-click export |
+| History UI | Applicable — chat scroll within AgentChatPanel for current session only |
+
+### 11.4 Multi-Session Continuity
+
+**NA (v1)** — No memory bridge across sessions. Each new session starts empty. Deferred to v2 when a persistent memory store (Redis/MySQL) is introduced.
+
+### 11.5 Conversation Reset & Branching
+
+**Partially Applicable**
+
+| Feature | Status |
+|---------|--------|
+| User-initiated clear ("New session" button) | Applicable — resets client state, generates new `session_id` |
+| Forking / branching from a past turn | **NA (v1)** — not a design goal for ops tool |
+| Share-as-link | **NA (v1)** — no external sharing; internal tool only |
+
+---
+
+# Part IV — Frontend & Backend
+
+## 12. Frontend Architecture
+
+### 12.1 Framework & Rendering Strategy
+
+**Applicable — Detailed**
+
+| Choice | Value |
+|--------|-------|
+| Framework | React 18 |
+| Bundler | Vite 5 |
+| Rendering | **CSR only** — single-page app; no SSR (internal tool, SEO not relevant) |
+| Routing | Single route in v1; no react-router |
+| State management | React hooks only — `useState`, `useEffect`, `useRef`; no Redux/Zustand |
+| Root component | `App.jsx` owns cross-panel state (`activeDelivery`, `processingComplete`) |
+
+### 12.2 Component Library
+
+**Applicable — Brief**
+
+- **No external design system** (MUI, Chakra, Ant Design) — lightweight, hand-rolled components.
+- **Primitives**: `Panel`, `Message`, `StatusPill`, `Button`, `Input` — all in `frontend/src/components/`.
+- **Composition**: each panel (`AgentChatPanel`, `StatusMonitorPanel`, `AnalysisPanel`) is a self-contained component that consumes props + exposes callbacks.
+- **Styling**: plain CSS per component (`App.css`, `panels/*.css`); no Tailwind, no CSS-in-JS.
+
+### 12.3 Chat UI Patterns
+
+**Applicable — Detailed**
+
+| Pattern | Implementation |
+|---------|----------------|
+| Message rendering | `<Message role={user|agent} content={...} timestamp={...} />` |
+| Markdown | Rendered via `react-markdown`; enabled for code blocks + bold/italic only |
+| Code blocks | For S3 paths and DAG run IDs; monospace; copy button |
+| Tool traces | Shown in StatusMonitorPanel (not inline in chat) — separation of concerns |
+| Citations | Inline `(S3: s3://...)` in agent reply; clickable to copy full path |
+| Typing indicator | Three-dot animation while waiting on `/chat` response |
+| Auto-scroll | Scrolls to bottom on new message; pauses if user scrolls up manually |
+
+### 12.4 Input Modalities
+
+**Partially Applicable**
+
+| Modality | v1 Status |
+|----------|-----------|
+| Text input | Applicable — primary modality |
+| File upload | **NA (v1)** — agent consumes S3 files, not user uploads |
+| Voice | **NA** — text only |
+| Image paste | **NA** — no image handling |
+| Drag-and-drop | **NA (v1)** — no file inputs |
+
+### 12.5 Accessibility
+
+**Partially Applicable**
+
+| Target | Status |
+|--------|--------|
+| WCAG 2.1 AA | Partial — basic labels + focus rings; full audit deferred |
+| Keyboard nav | Applicable — Enter submits chat, Tab between panels |
+| Screen reader | Partial — semantic HTML (`<main>`, `<section>`, ARIA live region for chat) |
+| Reduced motion | Applicable — respects `prefers-reduced-motion` for typing indicator |
+| Color contrast | Applicable — meets AA for body text |
+
+---
+
+## 13. Backend Services
+
+### 13.1 Service Boundaries
+
+**Applicable — Detailed**
+
+v1 is a **modular monolith** — single FastAPI process with clear module boundaries, not microservices.
+
+| Module | Responsibility |
+|--------|----------------|
+| `routers/chat.py` | HTTP entry for chat turns; invokes graph |
+| `routers/airflow.py` | HTTP entry for status polling |
+| `routers/analysis.py` | HTTP entry for reconciliation setup + summary |
+| `graph/` | LangGraph StateGraph + node implementations |
+| `services/llm_service.py` | LLM adapter |
+| `services/airflow_service.py` | SSH/Paramiko wrapper |
+| `services/s3_service.py` | Boto3 wrapper |
+| `services/db_service.py` | SQLAlchemy session + queries |
+| `services/crypto_service.py` | Fernet encryption helpers |
+| `session_store.py` | In-memory session dict |
+
+Rationale for monolith: single team, ops-tool scale (<50 concurrent sessions), faster iteration.
+
+### 13.2 Inter-Service Communication
+
+**Applicable — Brief**
+
+- **Intra-process**: direct Python function calls between modules (no network hop).
+- **External sync calls**: REST to Airflow (NA — uses SSH instead), S3 (Boto3 HTTPS), MySQL (PyMySQL TCP).
+- **External async**: **NA in v1** — no message queue, no pub/sub.
+- **LLM calls**: HTTPS to LLaMA endpoint (Bedrock or internal).
+
+### 13.3 Data Contracts
+
+**Applicable — Brief**
+
+- **Pydantic models** define every HTTP request/response body — generated into OpenAPI automatically by FastAPI.
+- **Shared schemas** live in `backend/schemas/` (e.g., `DeliveryRequest`, `ReconciliationResult`).
+- **Versioning**: path-based (`/v1/chat`) — v1 only in production today; breaking changes would introduce `/v2/`.
+- **Compatibility rule**: additive-only changes to existing endpoints; breaking changes require new version.
+
+### 13.4 Service Scaling
+
+**Partially Applicable**
+
+| Axis | Status |
+|------|--------|
+| Stateless request handlers | Applicable — sessions live in `session_store`, not in handlers |
+| Horizontal scale | **NA (v1)** — in-memory session store forces single instance; Redis would unblock this |
+| Hot-path isolation | Partial — chat route is the hot path; no dedicated worker pool |
+| Uvicorn workers | 1 for dev, 2–4 for staging/prod on the single box |
+
+### 13.5 Background Jobs
+
+**Partially Applicable**
+
+| Job Type | v1 Status |
+|----------|-----------|
+| Scheduled jobs | **NA (FastAPI side)** — Airflow is the scheduler for domain work |
+| Long-running tool calls | Applicable — handled inline with 60-iteration poll loop inside graph |
+| Idempotency | Applicable — DAG triggers deduped via run_id check before trigger |
+| Dead-letter queue | **NA (v1)** — no queue in architecture |
+
+---
+
+## 14. Streaming & Real-Time Communication
+
+### 14.1 Transport Choice
+
+**Partially Applicable**
+
+| Transport | v1 Status |
+|-----------|-----------|
+| SSE (Server-Sent Events) | **NA (v1)** — not yet implemented |
+| WebSockets | **NA (v1)** |
+| HTTP/2 streaming | **NA (v1)** |
+| **Short polling** | **Applicable** — StatusMonitorPanel polls `/airflow/status/{run_id}` every 3 seconds |
+
+Rationale for polling over SSE in v1: simpler FastAPI + nginx config; status updates every ~3s are acceptable for analyst UX.
+
+### 14.2 Token Streaming Protocol
+
+**NA (v1)** — chat replies return as full JSON after graph completion. Reconciliation step takes <2s, so perceived latency acceptable without token streaming. Deferred to v2.
+
+### 14.3 Tool Call Streaming
+
+**Partially Applicable**
+
+- **Airflow task state** streams to the StatusMonitorPanel via short polling — each task card updates as its state transitions (`queued → running → success`).
+- **Chat-side tool traces** are **NA** — tools fire inside the graph, final result returned as a single reply.
+
+### 14.4 Reconnection & Resume
+
+**Partially Applicable**
+
+- **Chat HTTP request**: single request/response — if network drops, user retries manually.
+- **Status polling**: stateless by design — polling resumes automatically on reconnection since `run_id` is client-side state.
+- **Checkpoint state**: the session store + `run_id` in the client together act as a checkpoint; after a browser refresh, the panel rehydrates from localStorage `{session_id, active_delivery}`.
+
+### 14.5 Client Buffering & Render Cadence
+
+**Applicable — Brief**
+
+- **Chat**: message appears atomically after `/chat` returns (no streaming, no buffering).
+- **Status monitor**: on each poll tick, only changed task cards re-render (keyed React list).
+- **Render throttle**: polling interval is 3s — no further throttling needed.
+- **Perceived latency**: "Triggering..." optimistic message shown immediately on user submit, replaced by real result when `/chat` returns.
+
+---
+
+## 15. Full-Stack Integration Patterns
+
+### 15.1 API Layer
+
+**Applicable — Detailed**
+
+- **Style**: REST over JSON, FastAPI-native.
+- **BFF (backend-for-frontend)**: the FastAPI app IS the BFF — there is no separate BFF tier.
+- **GraphQL**: **NA** — REST is sufficient for the small endpoint surface.
+- **Endpoints**:
+  - `POST /chat` — send user message, get agent reply
+  - `GET /airflow/status/{run_id}` — poll DAG run status
+  - `POST /analysis/setup` — prepare reconciliation context
+  - `POST /analysis/reconciliation` — get reconciliation summary
+  - `POST /analysis/followup` — follow-up Q&A within analysis scope
+  - `GET /health` — liveness probe
+
+### 15.2 Type Safety Across Stack
+
+**Partially Applicable**
+
+| Layer | Approach |
+|-------|----------|
+| Backend | Pydantic models → FastAPI auto-validates requests + generates OpenAPI |
+| Frontend | **Plain JS (no TypeScript in v1)** — types not enforced at compile time |
+| Shared types | **NA (v1)** — no codegen; team relies on OpenAPI doc + manual sync |
+| Contract tests | Partial — smoke tests verify each endpoint's response shape |
+
+Deferred: migrate frontend to TypeScript + generate client from OpenAPI (openapi-typescript).
+
+### 15.3 File Upload & Asset Pipeline
+
+**NA (v1)** — agent does not accept user uploads. All files originate from Airflow-produced S3 outputs. No presigned URLs, no virus scan, no upload endpoint.
+
+### 15.4 Feature Flags & Remote Config
+
+**Partially Applicable**
+
+- **Feature flags**: **NA (v1)** — no flag service (LaunchDarkly, Unleash, etc.).
+- **Remote config via `settings.yaml`**: Applicable — environment-specific settings (model endpoint, DB host, S3 bucket, Airflow host) are loaded from a YAML file + environment variables.
+- **Rollout strategy**: deploy-based; no runtime toggles.
+- **Hygiene**: **NA** — no stale flags to clean up.
+
+### 15.5 Third-Party Integrations
+
+**Applicable — Brief**
+
+| Integration | Purpose | Auth |
+|-------------|---------|------|
+| AWS S3 | Delivery output storage | IAM role on host (prod) / AWS_ACCESS_KEY in dev |
+| AWS RDS (MySQL) | Delivery catalog + fee records | DB credentials in env; Fernet-encrypted for persisted configs |
+| Airflow scheduler host | DAG triggering | SSH key pair (Paramiko) stored securely |
+| LLaMA endpoint (Bedrock / internal) | LLM inference | API key in env |
+| OAuth providers | **NA (v1)** — internal-network auth only |
+| Webhooks | **NA (v1)** — no inbound webhooks |
+
+---
+
+_Sections 1–15 complete. Awaiting confirmation to proceed to Section 16._
