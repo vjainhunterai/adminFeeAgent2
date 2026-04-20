@@ -494,4 +494,328 @@ v1.0 uses a **single supervisor graph** rather than multiple specialized agents.
 
 ---
 
-_Sections 1–5 complete. Awaiting confirmation to proceed to Section 6._
+# Part III — Behavior & Knowledge
+
+## 6. Prompt Engineering & System Prompts
+
+### 6.1 System Prompt Structure
+
+**Applicable — Detailed**
+
+The agent uses a single canonical system prompt with the following sections, injected at the start of every LangGraph run:
+
+| Block | Content |
+|-------|---------|
+| **Identity** | "You are the AdminFee Agent, an internal Voya operations copilot for administrative-fee delivery reconciliation." |
+| **Capabilities** | Normalize delivery IDs; trigger Airflow DAGs; read S3 outputs; compute reconciliation; answer follow-up questions |
+| **Constraints** | Never fabricate fee totals; never trigger DAGs not in the catalog; always cite S3 path or DAG run ID; refuse off-topic requests |
+| **Tone** | Short, formal, factual; no emojis; currency as `$x,xxx.xx` |
+| **Output format** | JSON-schema for node outputs; plain text for chat replies |
+| **Few-shot examples** | 3 normalization examples + 1 reconciliation example (see §6.3) |
+
+Per-node prompts extend the system prompt with the node's specific task (e.g., normalization node adds the delivery catalog snippet).
+
+### 6.2 Prompt Templates & Variables
+
+**Applicable — Detailed**
+
+Templates live in `backend/prompts/` as Python f-strings wrapped by a `PromptTemplate` helper. Variables are injected from `AgentState`.
+
+| Template | File | Key Variables |
+|----------|------|---------------|
+| `normalize_delivery.md` | `prompts/normalize.py` | `{user_message}`, `{delivery_catalog_snippet}` |
+| `reconcile_summary.md` | `prompts/reconcile.py` | `{delivery_id}`, `{expected_total}`, `{actual_total}`, `{file_path}` |
+| `followup_answer.md` | `prompts/followup.py` | `{session_history}`, `{question}`, `{tool_results}` |
+| `clarification.md` | `prompts/clarify.py` | `{ambiguous_input}`, `{candidate_matches}` |
+
+Templates are versioned via filename suffix (`normalize_v2.md`) — active version configured in `settings.yaml`.
+
+### 6.3 Few-Shot Example Library
+
+**Applicable — Brief**
+
+- **Location**: `backend/prompts/examples/` (plain markdown files, one per pattern).
+- **Selection**: Static — the top 3 canonical examples are always included for normalization. Dynamic selection deferred to v2.
+- **Refresh**: Analyst-curated — new examples added when a novel delivery-naming pattern produces misclassification in production logs.
+- **Sample entries**: `"run prps1 daily" → VRIAC_PRPS1_D`, `"john hancock monthly" → VRIAC_JH_M`, `"PRPS1" → VRIAC_PRPS1_D`.
+
+### 6.4 Prompt Versioning
+
+**Applicable — Brief**
+
+- Each prompt file has a header: `version: 1.2`, `last_updated: 2026-04-15`, `owner: adminfee-eng`.
+- Active version pinned in `settings.yaml` under `prompts:`.
+- Rollback: change setting value, no code deploy required (hot-reload on boot).
+- A/B testing **NA in v1** — single-user ops tool; not enough traffic for statistical A/B.
+
+### 6.5 Anti-Patterns
+
+**Applicable — Brief**
+
+Patterns explicitly avoided in our prompts:
+
+| Anti-Pattern | Why Avoided |
+|--------------|-------------|
+| Negation overload ("don't do X, don't do Y, don't Z") | LLaMA 8B handles affirmative instructions more reliably |
+| Conflicting instructions across blocks | Removes ambiguity in financial-action refusal |
+| Long preambles before the task | Wastes tokens; increases latency |
+| Asking the LLM to guess when uncertain | Replaced by explicit "if confidence < 0.7, ask clarifying question" |
+| Freeform JSON output | Replaced with schema-constrained output via LangChain structured output |
+
+---
+
+## 7. Tool Use & Function Calling
+
+### 7.1 Tool Catalog
+
+**Applicable — Detailed**
+
+| Tool | Schema Summary | Side Effects | Latency | Cost | Owner |
+|------|----------------|--------------|---------|------|-------|
+| `lookup_delivery(delivery_id)` | in: `str` → out: `{dag_id, s3_prefix, schedule}` | Read-only (MySQL) | ~50ms | ~0 | db_service |
+| `trigger_airflow_dag(dag_id)` | in: `str` → out: `{run_id, triggered_at}` | **Writes** — starts Airflow run | 1–3s | ~0 | airflow_service |
+| `get_airflow_status(run_id)` | in: `str` → out: `{state, task_states[]}` | Read-only (SSH) | ~500ms | ~0 | airflow_service |
+| `list_s3_objects(prefix)` | in: `str` → out: `[{key, size, last_modified}]` | Read-only (S3) | ~200ms | ~$0.0004/1k req | s3_service |
+| `get_s3_object(key)` | in: `str` → out: `bytes` | Read-only (S3) | ~500ms | ~$0.0004/1k req + data | s3_service |
+| `query_fee_records(delivery_id, date)` | in: `(str, date)` → out: `list[FeeRecord]` | Read-only (MySQL) | ~100ms | ~0 | db_service |
+| `compute_reconciliation(file_bytes, db_records)` | in: `(bytes, list)` → out: `ReconciliationResult` | Pure function (pandas) | ~200ms | 0 | reconcile_service |
+
+### 7.2 Tool Schema Conventions
+
+**Applicable — Brief**
+
+| Rule | Convention |
+|------|-----------|
+| Naming | `verb_noun` (e.g., `trigger_airflow_dag`, `get_s3_object`) |
+| Parameters | Primitives + Pydantic models; no free-form dicts |
+| Error shape | `{error_code, message, retryable: bool}` |
+| Idempotency | Read tools are idempotent; `trigger_airflow_dag` is NOT — deduped by caller via `run_id` check |
+| Timeouts | Every tool has explicit timeout; defaults: 5s read, 10s SSH, 30s S3 large read |
+
+### 7.3 Tool Selection Heuristics
+
+**Applicable — Brief**
+
+- LangGraph nodes call tools **deterministically** — the LLM does not choose which tool to call in v1. This is an explicit safety decision for financial actions.
+- The LLM is used **inside** nodes to interpret inputs (e.g., normalize text) or generate outputs (summary), not to route between tools.
+- Future v2: enable LLM tool-calling for follow-up Q&A only, where the action space is safe (read-only tools).
+
+### 7.4 Parallel vs. Sequential Execution
+
+**Applicable — Brief**
+
+- **Sequential** within a session: normalize → lookup → trigger → monitor → fetch → reconcile.
+- Rationale: financial-action ordering matters; each step depends on the previous.
+- **Parallel candidates (future)**: `list_s3_objects` + `query_fee_records` can run concurrently once `delivery_id` is known.
+
+### 7.5 Tool Failure Handling
+
+**Applicable — Detailed**
+
+| Tool | Failure Mode | Response |
+|------|--------------|----------|
+| `lookup_delivery` | Delivery not in catalog | Ask clarifying question; suggest nearest match |
+| `trigger_airflow_dag` | SSH timeout / DAG not found | Surface raw error; prompt user to retry; log incident |
+| `get_airflow_status` | Transient SSH failure | Retry 3× with exponential backoff (2s/4s/8s); then degrade to "status unavailable" |
+| `get_s3_object` | 404 | Tell user the DAG run may not have produced output yet; suggest waiting |
+| `get_s3_object` | 403 | Alert — likely credential issue; do NOT retry |
+| `compute_reconciliation` | Schema mismatch in CSV | Fail loudly with first bad row; do not silently skip |
+| LLM call (`normalize`) | 5xx / timeout | Regex fallback (`_fallback_normalize_delivery`) |
+| LLM call (`summarize`) | 5xx / timeout | Return raw numbers + note "LLM summary unavailable" |
+
+---
+
+## 8. Memory Architecture
+
+### 8.1 Memory Types
+
+**Partially Applicable**
+
+| Memory Type | Status in v1 | Detail |
+|-------------|-------------|--------|
+| **Short-term (context window)** | Applicable | LangGraph `AgentState` carries the full turn's data; context window ~8k tokens |
+| **Session memory** | Applicable | In-process dict keyed by `session_id`: `{active_delivery, run_id, s3_paths, last_reconciliation, chat_history}` |
+| **Long-term memory** | NA (v1) | No persistence across sessions; deferred to v2 (Redis or MySQL-backed) |
+| **Episodic memory** | NA (v1) | No cross-user learning from past interactions |
+| **Semantic memory** | Partial | Static delivery catalog in MySQL serves as read-only semantic memory |
+
+### 8.2 Write Path
+
+**Applicable — Brief**
+
+- After every node, updated `AgentState` is written back to the session store via `session_store.update(session_id, state)`.
+- Sensitive fields (e.g., SSH keys) are **never** written — they live only in environment variables.
+- No user PII is intentionally stored; the agent operates on delivery IDs, DAG IDs, and fee totals only.
+
+### 8.3 Read Path
+
+**Applicable — Brief**
+
+- On every `/chat` request, `session_store.get(session_id)` restores prior state.
+- Read is O(1) in memory; no ranking or retrieval logic needed in v1.
+- Follow-up Q&A uses the full session state (last delivery, last reconciliation) as injected context.
+
+### 8.4 Forgetting & Expiry
+
+**Applicable — Brief**
+
+- **TTL**: Session state expires after **2 hours of inactivity** (sliding window).
+- **Process restart**: In-memory store is cleared; sessions lost (acceptable for v1 ops use).
+- **User-initiated reset**: "New session" button in UI clears the session client-side and backend-side.
+- **Compliance purge**: Not required in v1 — no PII stored.
+
+### 8.5 Privacy Boundaries
+
+**Applicable — Brief**
+
+- Sessions are isolated by `session_id` (UUID generated client-side).
+- No cross-session leakage possible — session store lookup is strict key match.
+- Multi-user concurrency: each analyst gets their own session; no shared mutable state.
+- Authorization: single-tenant Voya deployment; network-level ACLs limit who can reach FastAPI.
+
+---
+
+## 9. Retrieval-Augmented Generation (RAG)
+
+### 9.1 Corpus & Sources
+
+**Partially Applicable**
+
+v1 does **not** use embedding-based RAG. However, two structured retrieval sources function as RAG-adjacent:
+
+| Source | Type | Purpose |
+|--------|------|---------|
+| `adminfee.delivery_catalog` (MySQL) | Structured | Delivery ID → DAG ID, S3 prefix, schedule |
+| `adminfee.fee_records` (MySQL) | Structured | Per-delivery fee rows for reconciliation |
+| S3 output files | Blob | Source of truth for actual fee totals |
+
+### 9.2 Ingestion Pipeline
+
+**NA** — No document-chunking pipeline in v1; data is retrieved live from MySQL and S3 per request.
+
+### 9.3 Embedding Strategy
+
+**NA (v1)** — Future v2 may embed delivery catalog descriptions for fuzzier normalization when catalog exceeds ~200 entries.
+
+### 9.4 Retrieval & Ranking
+
+**Partially Applicable**
+
+- **Today**: SQL `SELECT` with `LIKE` / exact match on delivery ID.
+- **Ranking**: Single result expected; tie-breaking by `schedule='D'` preferred over `'M'` when user says "daily" (implied).
+- **No vector search, no BM25, no reranker** in v1.
+
+### 9.5 Context Assembly
+
+**Applicable — Brief**
+
+- Retrieved catalog row and fee records are serialized as a small JSON block and injected into the reconciliation prompt.
+- Context budget: <1k tokens for retrieved facts; the rest of the 8k window is system prompt + chat history + output.
+- Citation: every fact in the summary carries a source tag (`S3:...` or `DB:adminfee.fee_records`).
+
+### 9.6 Evaluation
+
+**Partially Applicable**
+
+- **Recall@k**: NA (deterministic lookup, not retrieval).
+- **Faithfulness**: Measured via LLM-judge against S3 source on a golden set of 20 reconciliation cases (target ≥98%).
+- **Groundedness**: Every summary must cite S3 path; automated check flags summaries without citation.
+- **Answer relevance**: Manual spot-check by ops lead weekly.
+
+---
+
+## 10. Orchestration & Control Flow
+
+### 10.1 Agent Loop
+
+**Applicable — Detailed**
+
+LangGraph StateGraph executes a bounded, explicit loop:
+
+```
+START
+  │
+  ▼
+[normalize_delivery] ──(confidence < 0.7)──► [ask_clarification] ──► END (await user)
+  │ (confidence ≥ 0.7)
+  ▼
+[lookup_delivery] ──(not found)──► [report_not_found] ──► END
+  │ (found)
+  ▼
+[trigger_airflow]
+  │
+  ▼
+[monitor_airflow] ◄──┐  (poll loop, max 60 iterations × 5s = 5 min)
+  │ (all success)    │
+  ▼                  │
+[fetch_s3_output]    │
+  │                  │
+  ▼                  │
+[reconcile]          │
+  │                  │
+  ▼                  │
+[summarize] ─────────┘ (only on completion)
+  │
+  ▼
+END
+```
+
+Step limits:
+- Max 60 monitor iterations (5 min cap) before "timed out — check Airflow manually".
+- Max 3 retry attempts on any tool failure.
+
+### 10.2 Planning Strategies
+
+**Partially Applicable**
+
+- **Used**: Explicit state machine (LangGraph) — the plan is pre-encoded in graph edges.
+- **Not used**: ReAct (too free-form for financial actions), Plan-and-Execute (unnecessary — workflow is fixed), Tree-of-Thoughts (no branching exploration needed).
+- Rationale: the workflow is well-known and deterministic; explicit beats inferred for auditability.
+
+### 10.3 State Machine
+
+**Applicable — Detailed**
+
+`AgentState` TypedDict:
+```python
+class AgentState(TypedDict):
+    session_id: str
+    user_message: str
+    delivery_id: Optional[str]
+    dag_id: Optional[str]
+    run_id: Optional[str]
+    s3_prefix: Optional[str]
+    task_states: Optional[dict]
+    file_content: Optional[bytes]
+    reconciliation: Optional[ReconciliationResult]
+    chat_history: list[ChatTurn]
+    errors: list[str]
+    next_node: str  # for conditional routing
+```
+
+Terminal conditions: `next_node == "END"`, max iterations reached, unrecoverable error.
+
+### 10.4 Interruption & Human-in-the-Loop
+
+**Applicable — Brief**
+
+- **Clarification gate**: when normalization confidence is low, graph halts and emits a clarifying question to the user — user reply re-enters the graph.
+- **Explicit approval gate**: **NA in v1** — triggering a DAG is considered safe (triggers an existing, idempotent pipeline). v2 may add approval for destructive operations.
+- **Human handoff**: on unrecoverable error, agent outputs a message with the run ID, error, and instructs analyst to open a ticket.
+
+### 10.5 Determinism Levers
+
+**Applicable — Brief**
+
+| Lever | Setting |
+|-------|---------|
+| Temperature (normalization) | 0.0 |
+| Temperature (summary) | 0.2 |
+| Temperature (follow-up Q&A) | 0.3 |
+| Seed | Fixed `42` for reproducible tests; random in prod |
+| Structured output | JSON schema enforced via LangChain `with_structured_output()` on normalize + reconcile |
+| Max tokens | 256 (normalize), 1024 (summary), 2048 (follow-up) |
+
+---
+
+_Sections 1–10 complete. Awaiting confirmation to proceed to Section 11._
