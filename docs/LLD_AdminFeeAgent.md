@@ -1621,4 +1621,250 @@ On-call rotation: AdminFee eng team, weekly shifts; first-responder → platform
 
 ---
 
-_Sections 1–23 complete. Awaiting confirmation to proceed to Section 24._
+## 24. Data Architecture & Storage
+
+### 24.1 Data Stores
+
+**Applicable — Detailed**
+
+| Store | Role | Technology | Owner |
+|-------|------|-----------|-------|
+| **OLTP** | Delivery catalog, fee records, audit log | MySQL 8.0 on AWS RDS | AdminFee DBA |
+| **Object** | DAG output files (CSV), raw source files | AWS S3 (`voya-adminfee` bucket) | AdminFee Ops |
+| **Cache** | In-process LRU (catalog, normalization) | Python dict / `functools.lru_cache` | App |
+| **Session store** | Active user sessions | In-process Python dict (v1) | App |
+| **OLAP / Warehouse** | Analytics on reconciliation history | **NA (v1)** — no separate warehouse | — |
+| **Vector store** | Embeddings | **NA (v1)** — no RAG in v1 | — |
+
+### 24.2 Schemas & Migrations
+
+**Applicable — Detailed**
+
+Core tables (pre-existing Voya AdminFee schema; agent is a consumer):
+
+```sql
+-- Delivery catalog (source of truth for normalization + DAG mapping)
+CREATE TABLE delivery_catalog (
+  delivery_id   VARCHAR(64)  PRIMARY KEY,
+  dag_id        VARCHAR(128) NOT NULL,
+  s3_prefix     VARCHAR(256) NOT NULL,
+  schedule      ENUM('D','W','M') NOT NULL,
+  description   VARCHAR(256),
+  active        TINYINT(1)   DEFAULT 1,
+  updated_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Fee records per delivery
+CREATE TABLE fee_records (
+  id            BIGINT       PRIMARY KEY AUTO_INCREMENT,
+  delivery_id   VARCHAR(64)  NOT NULL,
+  delivery_date DATE         NOT NULL,
+  account_id    VARCHAR(64),
+  fee_amount    DECIMAL(18,2),
+  status        ENUM('PENDING','PROCESSED','PENDING_REVIEW','EXCLUDED'),
+  created_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_delivery_date (delivery_id, delivery_date)
+);
+
+-- Agent audit log
+CREATE TABLE agent_audit_log (
+  id            BIGINT       PRIMARY KEY AUTO_INCREMENT,
+  session_id    VARCHAR(64)  NOT NULL,
+  timestamp     TIMESTAMP(3) DEFAULT CURRENT_TIMESTAMP(3),
+  actor_ip      VARCHAR(45),
+  action        VARCHAR(64)  NOT NULL,
+  resource      VARCHAR(256),
+  result        ENUM('success','failure'),
+  run_id        VARCHAR(128),
+  error_msg     TEXT,
+  INDEX idx_session (session_id),
+  INDEX idx_timestamp (timestamp)
+);
+```
+
+| Aspect | Choice |
+|--------|--------|
+| Source of truth | Flyway migrations in `backend/migrations/` |
+| Migration tool | Flyway (existing Voya standard) |
+| Zero-downtime pattern | Additive-only in a deploy; destructive changes sequenced across two deploys (expand → migrate → contract) |
+| Rollback | Forward-only migrations; rollback via compensating migration |
+
+### 24.3 Data Lifecycle
+
+**Applicable — Brief**
+
+| Data | Ingestion | Enrichment | Retention | Deletion |
+|------|-----------|-----------|-----------|----------|
+| `delivery_catalog` | Manual CRUD by admins | None | Indefinite (small table) | Soft via `active=0` |
+| `fee_records` | Airflow DAGs write daily | Agent reads only | 7 years (regulatory) | Archived to Glacier after 2 years |
+| `agent_audit_log` | Agent writes on each tool call | None | 1 year | Archived to Glacier after 1 year |
+| S3 delivery outputs | Airflow DAGs write | None | 7 years | Lifecycle policy: Glacier after 90 days |
+| Session state | In-memory only | None | 2 hours idle | Evicted by TTL |
+
+### 24.4 Privacy & Compliance
+
+**Applicable — Detailed**
+
+| Aspect | Posture |
+|--------|---------|
+| **PII classification** | Low — delivery IDs and fee totals are not PII; `account_id` is pseudonymous internal ID |
+| **Encryption at rest** | RDS: AES-256 (default); S3: SSE-S3; Fernet for DB-stored sensitive configs |
+| **Encryption in transit** | TLS 1.2+ for all external hops (S3, RDS, LLM endpoint); SSH for Airflow |
+| **GDPR** | **NA** — internal tool, no EU data subjects |
+| **CCPA** | **NA** — internal, not consumer-facing |
+| **HIPAA** | **NA** — not a healthcare workload |
+| **SOX** | **Applicable** — financial-reporting system of record; audit log + immutable retention required |
+| **Data residency** | US-East only; no cross-region replication in v1 |
+
+### 24.5 Analytics & Data Warehouse
+
+**Partially Applicable**
+
+- **v1**: No dedicated warehouse. Ops metrics (sessions/day, MTTR) are computed from Prometheus + structured logs.
+- **Event schema**: structured log records (§21.2) serve as the de-facto event schema.
+- **ETL**: **NA (v1)** — if warehouse is added in v2, logs would be shipped via Kafka / Firehose.
+- **Dashboards**: Grafana (operational/quality) + Excel export of audit log for ad-hoc analysis.
+
+---
+
+## 25. Deployment & Infrastructure
+
+### 25.1 Environments
+
+**Applicable — Detailed**
+
+| Environment | Purpose | Data | Parity with Prod |
+|-------------|---------|------|------------------|
+| **local/dev** | Developer laptops | Mocked Airflow/S3; seeded MySQL | Partial — different creds, local MySQL |
+| **staging** | Integration + pre-release | Airflow sandbox; S3 non-prod bucket; MySQL staging DB (scrubbed copy of prod) | High — same infra, scrubbed data |
+| **canary** | **NA (v1)** | — | — |
+| **prod** | Live analyst usage | Real Airflow, S3, RDS | — |
+
+Data handling: staging DB is a nightly-refreshed scrubbed copy of prod (account IDs hashed). No prod data in dev.
+
+### 25.2 CI/CD Pipeline
+
+**Applicable — Detailed**
+
+| Stage | Tool | Actions |
+|-------|------|---------|
+| **Build** | GitHub Actions | `pip install -r requirements.txt`, `npm ci`, lint (ruff, eslint), type check (mypy) |
+| **Test** | GitHub Actions | pytest (backend unit + integration), vitest (frontend) |
+| **LLM eval** | GitHub Actions (manual trigger for now) | Run normalization + reconciliation golden sets |
+| **Package** | GitHub Actions | Build frontend (`npm run build`), produce backend wheel |
+| **Deploy staging** | GitHub Actions | Upload artifacts to staging host; restart Uvicorn |
+| **Approval gate** | Manual | Tech lead signs off in GitHub environment protection rule |
+| **Deploy prod** | GitHub Actions | Upload artifacts; blue/green swap |
+| **Smoke test** | GitHub Actions | Hit `/health`, run 1 canonical chat turn, verify reconciliation |
+
+### 25.3 Infrastructure-as-Code
+
+**Partially Applicable**
+
+| Aspect | v1 Status |
+|--------|-----------|
+| IaC tool | **Partial** — Terraform for AWS resources (RDS, S3 bucket policy, IAM roles); app host provisioned manually |
+| Module structure | `terraform/` directory with modules: `rds`, `s3`, `iam`, `networking` |
+| Drift detection | **NA (v1)** — no Terraform Cloud / Atlantis; drift checked manually |
+| Future state | Full IaC including app compute (ECS / EKS) in v2 |
+
+### 25.4 Container & Orchestration
+
+**Partially Applicable**
+
+| Aspect | v1 Status |
+|--------|-----------|
+| Containerization | **NA (v1)** — FastAPI runs directly on a Voya-managed EC2/VM under systemd |
+| Runtime | systemd unit → Uvicorn (2 workers) |
+| Autoscaling | **NA (v1)** — single instance; vertical resize only |
+| v2 plan | Dockerize → push to ECR → run on ECS Fargate with ALB + autoscaling |
+
+### 25.5 Release Strategy
+
+**Partially Applicable**
+
+| Strategy | v1 Status |
+|----------|-----------|
+| **Blue/green** | Applicable — 2 Uvicorn processes on different ports behind nginx; swap via nginx config reload |
+| **Canary** | **NA (v1)** — single instance prevents true canary; v2 with multi-instance will enable 10% canary |
+| **Feature-flag dark launches** | **NA (v1)** — no flag service |
+| **Rollback SLA** | 15 minutes from alert → nginx rollback to previous version |
+| **Release cadence** | Weekly planned; hotfix as needed |
+
+---
+
+## 26. Reliability & Resilience
+
+### 26.1 SLOs & Error Budgets
+
+**Applicable — Detailed**
+
+| SLO | Target | Measurement Window |
+|-----|--------|---------------------|
+| `/chat` availability (2xx rate) | 99.5% | 30-day rolling |
+| `/chat` P95 latency | ≤ 2s | 30-day rolling |
+| End-to-end reconciliation latency (trigger → summary) | ≤ 5 min P95 | 30-day rolling |
+| Reconciliation correctness (vs. S3 source) | ≥ 99.9% | 30-day rolling, sampled |
+| Audit log write success | 100% | Continuous (hard SLO — no budget) |
+
+Error budget: 0.5% per month for `/chat` availability (~3.6 hours). Exhausting budget triggers a release freeze until a postmortem + mitigation lands.
+
+### 26.2 Failure Modes
+
+**Applicable — Detailed**
+
+| Failure | Impact | Response |
+|---------|--------|----------|
+| LLM provider outage | Can't normalize fuzzy inputs, can't summarize | Regex fallback handles normalization for top 20 patterns; summary degrades to raw numbers + note |
+| Airflow scheduler unreachable (SSH) | Can't trigger DAGs | Surface clear error; 3× backoff retry; analyst falls back to Airflow UI manually |
+| S3 outage | Can't fetch delivery outputs | Tell user "S3 unavailable, retry in N minutes"; do NOT fabricate totals |
+| MySQL RDS outage | Can't normalize or query fee records | Service essentially down; return 503 with Retry-After |
+| App host crash | Full outage | systemd auto-restart; blue/green partner takes traffic if multi-instance (v2) |
+| Session store memory pressure | Degraded perf, potential OOM | Monitor alert at 500 MB; manual restart |
+| LLM returns malformed JSON | Schema-constrained output fails | Retry once; if still bad, surface error; do not attempt free-text parse |
+
+### 26.3 Fallback & Degraded Modes
+
+**Applicable — Brief**
+
+| Component Down | Degraded Mode |
+|----------------|---------------|
+| LLM (normalization) | Regex fallback (`_fallback_normalize_delivery`) |
+| LLM (summary) | Return raw totals + "LLM summary unavailable" banner |
+| Airflow | "Triggering unavailable — use Airflow UI directly" + link |
+| S3 | "Delivery outputs unavailable — retry shortly" |
+| MySQL | Agent is effectively down; 503 with friendly error page |
+| Status polling | Show last-known state + "Reconnecting..." |
+
+UX principle: **never fabricate data**. Always say what is not available.
+
+### 26.4 Backup & Disaster Recovery
+
+**Applicable — Brief**
+
+| Data | RPO | RTO | Backup Mechanism |
+|------|-----|-----|------------------|
+| MySQL RDS | 5 min | 1 hour | RDS automated backups + point-in-time restore |
+| S3 delivery outputs | 0 (object-versioning on) | n/a | S3 versioning + cross-region replication (Voya standard) |
+| Audit log | 5 min | 1 hour | Same as MySQL RDS |
+| Session state | N/A (ephemeral) | N/A | Acceptable to lose on disaster |
+| App code | 0 | 15 min | Git + CI re-deploy |
+| Multi-region | **NA (v1)** — single-region (us-east-1); v2 target: us-west-2 warm standby |
+| Restore drills | Quarterly tabletop; annual live restore |
+
+### 26.5 Circuit Breakers & Bulkheads
+
+**Partially Applicable**
+
+| Pattern | v1 Status |
+|---------|-----------|
+| **Circuit breaker (LLM)** | Applicable — after 5 consecutive failures in 60s, open circuit for 2 min, route all normalization to regex fallback |
+| **Circuit breaker (Airflow SSH)** | Applicable — after 3 SSH failures in 30s, open for 1 min, surface "Airflow unavailable" |
+| **Retry with backoff + jitter** | Applicable — 2s/4s/8s with ±500ms jitter, max 3 attempts on transient errors |
+| **Bulkheads** | **Partial** — LLM/Airflow/S3 clients each have their own thread pool; one slow dependency does not starve the others |
+| **Timeouts** | Applicable — every external call has explicit timeout (§7.2) |
+| **Idempotency keys** | Partial — DAG triggers deduped on `(delivery_id, business_date)` to prevent double-trigger on retry |
+
+---
+
+_Sections 1–26 complete. Awaiting confirmation to proceed to Section 27._
