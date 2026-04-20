@@ -1423,4 +1423,202 @@ Assets: DAG trigger capability, delivery data in S3, DB records.
 
 ---
 
-_Sections 1–20 complete. Awaiting confirmation to proceed to Section 21._
+## 21. Observability & Monitoring
+
+### 21.1 Telemetry Stack
+
+**Applicable — Detailed**
+
+| Signal | Tool | Retention | Sampling |
+|--------|------|-----------|----------|
+| **Logs** | Python `logging` → stdout → Voya central log store (ELK / Splunk) | 1 year | 100% for WARN+; 10% sampled for INFO on hot paths |
+| **Metrics** | Prometheus client → Prometheus / Grafana | 90 days | 100% |
+| **Traces** | **Partial (v1)** — request IDs propagated in logs; no OpenTelemetry yet | n/a | Deferred to v2 |
+| **LLM traces** | Custom: prompt + response + latency logged per call | 90 days | 100% |
+
+### 21.2 LLM-Specific Observability
+
+**Applicable — Detailed**
+
+Each LLM call emits a structured record:
+
+| Field | Example |
+|-------|---------|
+| `session_id` | `abc-123` |
+| `node` | `normalize_delivery` |
+| `model` | `llama-3.1-8b` |
+| `prompt_tokens` | 412 |
+| `completion_tokens` | 28 |
+| `latency_ms` | 487 |
+| `temperature` | 0.0 |
+| `confidence` | 0.92 (for classification nodes) |
+| `prompt_hash` | sha256 of prompt (for dedup / eval correlation) |
+| `response_hash` | sha256 of response |
+| `fallback_used` | bool — true when regex fallback triggered |
+
+Tool-call traces (Airflow, S3, DB) emit similar structured records keyed by `session_id` + `run_id`.
+
+### 21.3 Dashboards
+
+**Applicable — Brief**
+
+| Dashboard | Audience | Key Panels |
+|-----------|----------|------------|
+| **Operational** | SRE / on-call | Request rate, P50/P95/P99 latency, error rate, LLM 5xx, SSH failures |
+| **Quality** | AdminFee eng lead | Normalization accuracy trend, fallback-usage %, reconciliation faithfulness score |
+| **Business** | Ops leadership | Deliveries reconciled/day, MTTR, analyst sessions/day, avg session length |
+
+### 21.4 Alerting
+
+**Applicable — Detailed**
+
+| Alert | Threshold | Route |
+|-------|-----------|-------|
+| `/chat` P95 latency | > 5s for 5 min | Slack `#adminfee-ops` |
+| Airflow trigger error rate | > 5% over 10 min | PagerDuty on-call |
+| LLM 5xx rate | > 10% over 5 min | Slack + PagerDuty |
+| Reconciliation delta > $10k | Any occurrence | Slack `#adminfee-alerts` (audit, not on-call) |
+| Normalization accuracy drop (daily job) | <95% | Slack `#adminfee-eng` |
+| Session-store memory | >500 MB | Slack (indicates leak or high concurrency) |
+
+On-call rotation: AdminFee eng team, weekly shifts; first-responder → platform SRE as escalation.
+
+### 21.5 Debugging Workflows
+
+**Applicable — Brief**
+
+- **Trace-to-conversation lookup**: given a `session_id` from a user complaint, SRE can pull the full chat history + all tool traces from logs in <2 min.
+- **Replay tooling**: **NA (v1)** — no deterministic replay; the structured LLM trace is sufficient to reconstruct what happened.
+- **Shadow runs**: **NA (v1)** — no dual-model shadowing yet; deferred until a candidate model swap is on the roadmap.
+- **Local reproduction**: `scripts/replay_session.py` accepts a session log export and re-runs normalization + reconciliation offline against mocks.
+
+---
+
+## 22. Cost Management & Optimization
+
+### 22.1 Cost Model
+
+**Applicable — Brief**
+
+| Cost Center | v1 Estimate |
+|-------------|-------------|
+| **LLM inference** | ~$0.02 per session (avg 2k prompt + 500 completion tokens × 3 calls × $0.0003/1k) |
+| **Compute** (FastAPI host) | ~$80/month (single t3.medium equivalent) |
+| **MySQL RDS** | Shared Voya cost (negligible incremental) |
+| **S3 requests** | ~$0.01 per session (20 requests) |
+| **Airflow** | Not charged to this app (shared infra) |
+| **Total per session** | **~$0.03–$0.05** |
+| **Target at 200 sessions/day** | **<$300/month incremental** |
+
+### 22.2 Token Budgets
+
+**Applicable — Brief**
+
+| Node | Input cap | Output cap |
+|------|-----------|-----------|
+| `normalize_delivery` | 1k tokens | 256 tokens |
+| `reconcile` summary | 3k tokens (facts) | 1k tokens |
+| `answer_followup` | 4k tokens (history + context) | 2k tokens |
+
+- **Dynamic truncation**: chat history summarized when > 10 turns (§11.2).
+- **User-tier limits**: **NA (v1)** — all users same tier.
+
+### 22.3 Caching Strategies
+
+**Partially Applicable**
+
+| Cache | v1 Status |
+|-------|-----------|
+| **Delivery-catalog cache** | Applicable — in-process LRU (100 entries, 10-min TTL) |
+| **Normalization cache** | Applicable — exact-match cache on `(user_message_lowercased) → delivery_id`, 1-hour TTL, 1k entries |
+| **S3 object cache** | Applicable — per-session cache of last fetched output (avoids re-download on follow-up Q&A) |
+| **Prompt caching (provider-side)** | **NA (v1)** — LLaMA endpoint does not yet expose prompt-prefix caching |
+| **Semantic cache** | **NA (v1)** — deferred; requires embedding infra |
+| **CDN** | **NA** — single-region internal app, no static-asset CDN |
+
+### 22.4 Model Cascading
+
+**Partially Applicable**
+
+- **Today**: single-tier (LLaMA 3.1 8B) + deterministic regex fallback for normalization. No escalation to larger model.
+- **v2 plan**: cascade to LLaMA 3.1 70B if 8B normalization confidence < 0.6 on a given input.
+- **Cheap-first principle**: regex already runs as a pre-check for the top 20 common patterns; LLM invoked only if regex misses.
+
+### 22.5 Cost Alerts & Attribution
+
+**Partially Applicable**
+
+- **Per-feature attribution**: each LLM call log record includes `node` name; enables per-node cost breakdown in dashboard.
+- **Per-user attribution**: **NA (v1)** — no user identity beyond session; v2 with SSO will enable per-analyst reporting.
+- **Cost alert**: Prometheus rule — daily LLM spend > $20 → Slack alert (indicates abuse or bug).
+- **Chargeback**: **NA** — internal tool, not billed to business units in v1.
+
+---
+
+## 23. API Design & Contracts
+
+### 23.1 API Style & Conventions
+
+**Applicable — Detailed**
+
+- **Style**: REST over JSON; FastAPI + Pydantic.
+- **Resource model**:
+  - `POST /chat` — create a turn in a session (session_id is body field, not path)
+  - `GET /airflow/status/{run_id}` — read Airflow run state
+  - `POST /analysis/setup` / `POST /analysis/reconciliation` / `POST /analysis/followup` — reconciliation actions
+  - `GET /health` — liveness
+- **Naming**: lowercase snake_case in JSON; kebab-case in paths if ever introduced.
+- **Pagination**: **NA (v1)** — all responses are single-object or small lists.
+- **Filtering**: **NA (v1)** — no list endpoints.
+- **Errors**: uniform shape:
+  ```json
+  {
+    "error": {
+      "code": "AIRFLOW_TRIGGER_FAILED",
+      "message": "SSH connection to scheduler host timed out",
+      "retryable": true,
+      "request_id": "req-abc-123"
+    }
+  }
+  ```
+
+### 23.2 Versioning
+
+**Partially Applicable**
+
+- **v1**: no version prefix in paths today (internal tool, single client).
+- **Policy going forward**: introduce `/v2/` URI prefix on any breaking change; additive changes require no version bump.
+- **Deprecation window**: 90 days minimum for any removed endpoint; deprecation flag in response headers (`X-API-Deprecated: true`).
+- **Media-type versioning**: **NA** — URI versioning chosen for simplicity.
+
+### 23.3 Rate Limiting & Quotas
+
+**Partially Applicable**
+
+| Limit | Status |
+|-------|--------|
+| Per-session `/chat` | Applicable — 60 messages/min (in-process counter) |
+| Per-IP global | **NA (v1)** — network-trust boundary; add at nginx layer in v2 |
+| Per-API-key | **NA** — no API keys in v1 |
+| Burst vs. sustained | **NA (v1)** — single soft limit |
+| 429 response | Applicable — returned with `Retry-After: 60` header |
+
+### 23.4 SDK & Client Libraries
+
+**NA (v1)** — no external programmatic clients. The only consumer is the React frontend, which calls `fetch()` directly against the FastAPI endpoints. OpenAPI schema is auto-generated by FastAPI and available at `/docs` for reference, but no SDK is published.
+
+### 23.5 Developer Experience
+
+**Partially Applicable**
+
+| Item | v1 Status |
+|------|-----------|
+| Docs site | **NA (public)** — internal README covers setup |
+| Interactive playground | Applicable — FastAPI auto-serves Swagger UI at `/docs` for internal developers |
+| Sample apps | **NA** — the React frontend IS the sample |
+| Changelog | Applicable — `CHANGELOG.md` in repo root; updated per release |
+| API reference | Applicable — OpenAPI spec at `/openapi.json`; re-rendered in Swagger UI |
+
+---
+
+_Sections 1–23 complete. Awaiting confirmation to proceed to Section 24._
